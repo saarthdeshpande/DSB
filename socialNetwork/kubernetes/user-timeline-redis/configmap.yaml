@@ -8,7 +8,7 @@ metadata:
     socialnetwork/service: user-timeline-redis
 data:
   redis.conf: |    
-    io-threads 8
+    io-threads 1
     io-threads-do-reads yes
     port 6379
     tls-port 0

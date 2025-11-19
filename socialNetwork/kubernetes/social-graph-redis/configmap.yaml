@@ -1,5 +1,6 @@
 ---
 # Source: social-network/charts/social-graph-redis/templates/configmap.yaml
+# changed io-threads from 8 to 2
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -8,7 +9,7 @@ metadata:
     socialnetwork/service: social-graph-redis
 data:
   redis.conf: |    
-    io-threads 8
+    io-threads 1
     io-threads-do-reads yes
     port 6379
     tls-port 0
