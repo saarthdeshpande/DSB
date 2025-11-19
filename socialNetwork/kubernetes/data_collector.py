@@ -11,7 +11,9 @@ import yaml
 from utils import interval_string_to_seconds
 
 hpa_config_file = "hpa_config.yaml"
-wrk2file_path = "../wrk2/scripts/social-network/compose-post-gpt.lua"
+# wrk2file_path = "../wrk2/scripts/social-network/compose-post-gpt.lua"
+locustfile_path = "./locustfile.py"
+locust_venv = "./venv/bin"
 frontend_ip = "128.110.96.91:32000"  # <b>node's</b> internal IP
 
 microservices = []
@@ -221,20 +223,23 @@ def main():
     #     logging.info(f"Waiting for thread {i + 1}/{len(threads)} to complete")
     #     thread.join(timeout=interval_string_to_seconds(args.time) + 90)
     #     logging.info(f"Thread {i + 1}/{len(threads)} completed")
-    wrk2Process = None
-
+    # wrk2Process = None
+    locustProcess = None
+    flags = f"--headless -u 1000 -r 100 -t {args.time} -d {metric}"
     try:
         # wrk2Cmd = f"/usr/local/bin/wrk -t4 -c100 -d{args.time} -R500 -s {wrk2file_path} http://{frontend_ip} -- {metric}"
-        print("Applying wrk. Sleeping for 15s.")
-        # TODO: configure number of threads and T* number of rps entries
-        command = shlex.split(f'wrk -t1 -c200 -d{args.time} -R500 -s {wrk2file_path} http://{frontend_ip}')
-        wrk2Process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(15)
-        print("Wrk process completed.")
-
+        # print("Applying wrk. Sleeping for 15s.")
+        # # TODO: configure number of threads and T* number of rps entries
+        # command = shlex.split(f'wrk -t1 -c200 -d{args.time} -R500 -s {wrk2file_path} http://{frontend_ip}')
+        # wrk2Process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        locustCmd = f"-f {locustfile_path} --host=http://{frontend_ip} {flags}"
+        logging.info("Applying locust.")
+        command = [locust_venv + "/python", locust_venv + "/locust"] + shlex.split(locustCmd)
+        locustProcess = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        logging.info("Locust process completed. Sleeping until load builds up.")
         for thread in threads:
             thread.start()
-        stdout, stderr = wrk2Process.communicate(timeout=interval_string_to_seconds(args.time) + 90)
+        stdout, stderr = locustProcess.communicate(timeout=interval_string_to_seconds(args.time) + 90)
         print("STDOUT: ", stdout)
         print("STDERR: ", stderr)
     except subprocess.TimeoutExpired:
