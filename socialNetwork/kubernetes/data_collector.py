@@ -28,57 +28,233 @@ def str_presenter(dumper, data):
     return dumper.represent_scalar("tag:yaml.org,2002:str", data)
 
 LiteralDumper.add_representer(str, str_presenter)
-
-# Optional: keep key order and avoid long line wrapping
 LiteralDumper.ignore_aliases = lambda *args: True
 
 yaml_width = 4096
 
+
 def create_hpa_yaml(args):
     global microservices
-    DEF_all = {"req":{"cpu":"500m","memory":"128Mi"},"lim":{"cpu":"1000m","memory":"256Mi"}}
-    # DEF_redis = {"req":{"cpu":"1000m","memory":"128Mi"},"lim":{"cpu":"2000m","memory":"256Mi"}}
-    metrics = []
-    if getattr(args, "cpu", False):
-        metrics.append({'type':'Resource','resource':{'name':'cpu','target':{'type':'Utilization','averageUtilization':50}}})
-    if getattr(args, "memory", False):
-        metrics.append({'type':'Resource','resource':{'name':'memory','target':{'type':'Utilization','averageUtilization':50}}})
+
+    # Default resources for all (stateless-ish) services
+    # This is a safe baseline that matches typical SocialNetwork setups.
+    DEF_all = {
+        "req": {"cpu": "500m", "memory": "128Mi"},
+        "lim": {"cpu": "1000m", "memory": "256Mi"},
+    }
+
+    # Service-specific HPA tuning (p99-oriented)
+    # Lower targets for latency-critical / cache tiers, slightly higher for auxiliary services.
+    service_cpu_target = {
+        # Frontend / entrypoint
+        "nginx-thrift": 50,
+
+        # Core critical path (compose & timelines + user/social graph/post storage)
+        "compose-post-service": 55,
+        "home-timeline-service": 55,
+        "user-timeline-service": 55,
+        "user-service": 55,
+        "social-graph-service": 55,
+        "post-storage-service": 55,
+
+        # Redis / Memcached caches – very latency-sensitive, keep them cool
+        "home-timeline-redis": 45,
+        "user-timeline-redis": 45,
+        "social-graph-redis": 45,
+        "user-memcached": 45,
+        "post-storage-memcached": 45,
+        "url-shorten-memcached": 45,
+        # If media-memcached exists in this tree, we want the same policy
+        "media-memcached": 45,
+
+        # Conditional services on compose/read paths
+        "unique-id-service": 60,
+        "text-service": 60,
+        "user-mention-service": 60,
+        "url-shorten-service": 60,
+        "media-service": 60,
+        "media-frontend": 60,
+    }
+
+    # Per-service min/max replicas.
+    # Max values assume a ~3-node cluster; adjust upward if you have more capacity.
+    service_min_max = {
+        # Entry point – want fan-out headroom
+        "nginx-thrift": (3, 24),
+
+        # Core critical path business logic
+        "compose-post-service": (2, 16),
+        "home-timeline-service": (2, 16),
+        "user-timeline-service": (2, 16),
+        "user-service": (2, 12),
+        "social-graph-service": (2, 16),
+        "post-storage-service": (2, 16),
+
+        # Cache tiers (Redis + Memcached).
+        # Min=1 because vanilla Redis/Memcached in DSB aren’t clustered; >1 is allowed here
+        # so you can experiment, but if you see cache thrash you can pin maxReplicas back to 1.
+        "home-timeline-redis": (1, 8),
+        "user-timeline-redis": (1, 8),
+        "social-graph-redis": (1, 8),
+        "user-memcached": (1, 8),
+        "post-storage-memcached": (1, 8),
+        "url-shorten-memcached": (1, 8),
+        "media-memcached": (1, 8),
+
+        # “Leaf” / auxiliary services
+        "unique-id-service": (2, 8),
+        "text-service": (2, 10),
+        "user-mention-service": (2, 8),
+        "url-shorten-service": (2, 8),
+        "media-service": (2, 10),
+        "media-frontend": (2, 8),
+    }
+
+    # Stateful / infra components we DON'T want HPAs on.
+    # Note: *deliberately* do NOT include redis/memcached here so they get HPAs.
+    HPA_SKIP_KEYWORDS = (
+        "mongodb",     # all the user/url/post/social-graph/user-timeline mongodb backends
+        "mongos",      # sharded routers, if present
+        "configsvr",   # mongo config servers
+        "jaeger",      # tracing infra
+        "prometheus",  # monitoring stack
+    )
+
+    # Shared HPA behavior: aggressive scale-up, conservative scale-down.
+    # This helps keep p99 low under bursts while avoiding thrashy downsizing.
+    behavior_spec = {
+        "scaleUp": {
+            "stabilizationWindowSeconds": 0,
+            "policies": [
+                # At most double the replicas every 30s
+                {"type": "Percent", "value": 100, "periodSeconds": 30},
+            ],
+            "selectPolicy": "Max",
+        },
+        "scaleDown": {
+            # Keep replicas around for a while after load drops – protects the tail.
+            "stabilizationWindowSeconds": 300,
+            "policies": [
+                # At most shrink by 20% per minute
+                {"type": "Percent", "value": 20, "periodSeconds": 60},
+            ],
+            "selectPolicy": "Min",
+        },
+    }
+
     all_configs = []
-    for folder in os.listdir('.'):
-        if folder == 'scripts': continue
+
+    for folder in os.listdir("."):
+        if folder == "scripts":
+            continue
+
         for fn in glob.glob(f"{folder}/*.yaml"):
             with open(fn) as f:
                 docs = list(yaml.safe_load_all(f))
-            if fn.endswith('deployment.yaml') and 'mongodb' not in fn:
-                # if '-redis' in fn:
-                #    DEF = DEF_redis
-                # else:
-                DEF = DEF_all
-                # if 'home-timeline' in fn or 'nginx' in fn:
-                #     pMin, pMax = 1, 10
-                # else:
-                pMin, pMax = 1, 20
+
+            # We still skip mongodb deployments entirely here (no HPA + no mass-editing resources)
+            if fn.endswith("deployment.yaml") and "mongodb" not in fn:
                 for d in docs:
-                    if isinstance(d, dict) and d.get('kind') == 'Deployment':
-                        spec = (((d.get('spec') or {}).get('template') or {}).get('spec') or {})
-                        for k in ('containers','initContainers'):
-                            for c in spec.get(k, []) or []:
-                                r = c.setdefault('resources', {})
-                                rq, lm = r.setdefault('requests', {}), r.setdefault('limits', {})
-                                rq.setdefault('cpu', DEF['req']['cpu']);   rq.setdefault('memory', DEF['req']['memory'])
-                                lm.setdefault('cpu', DEF['lim']['cpu']);   lm.setdefault('memory', DEF['lim']['memory'])
-                        name = d.get('metadata', {}).get('labels', {}).get('service') or d.get('metadata', {}).get('name')
-                        if metrics and name:
-                            microservices.append(name)
-                            docs.append({
-                                'apiVersion':'autoscaling/v2','kind':'HorizontalPodAutoscaler',
-                                'metadata':{'name':name},
-                                'spec':{'scaleTargetRef':{'apiVersion':'apps/v1','kind':'Deployment','name':name},
-                                        'minReplicas':pMin,'maxReplicas':pMax,'metrics':metrics}
-                            })
+                    if not (isinstance(d, dict) and d.get("kind") == "Deployment"):
+                        continue
+
+                    spec = (
+                        ((d.get("spec") or {}).get("template") or {}).get("spec")
+                        or {}
+                    )
+
+                    name = (
+                        d.get("metadata", {}).get("labels", {}).get("service")
+                        or d.get("metadata", {}).get("name")
+                    )
+                    if not name:
+                        continue
+
+                    # Decide default resources: caches can use the same baseline for now.
+                    DEF = DEF_all
+
+                    # Ensure every container has resource requests/limits
+                    for k in ("containers", "initContainers"):
+                        for c in spec.get(k, []) or []:
+                            r = c.setdefault("resources", {})
+                            rq = r.setdefault("requests", {})
+                            lm = r.setdefault("limits", {})
+
+                            rq.setdefault("cpu", DEF["req"]["cpu"])
+                            rq.setdefault("memory", DEF["req"]["memory"])
+                            lm.setdefault("cpu", DEF["lim"]["cpu"])
+                            lm.setdefault("memory", DEF["lim"]["memory"])
+
+                    # Do not attach HPA to stateful/infra components
+                    if any(kw in name for kw in HPA_SKIP_KEYWORDS):
+                        continue
+
+                    # Build metrics per-service so we can vary CPU target
+                    metrics = []
+
+                    if getattr(args, "cpu", False):
+                        cpu_target = service_cpu_target.get(name, 60)
+                        metrics.append(
+                            {
+                                "type": "Resource",
+                                "resource": {
+                                    "name": "cpu",
+                                    "target": {
+                                        "type": "Utilization",
+                                        "averageUtilization": cpu_target,
+                                    },
+                                },
+                            }
+                        )
+
+                    # if getattr(args, "memory", False):
+                    #     # Memory-based scaling is noisy; keep target relaxed.
+                    #     metrics.append(
+                    #         {
+                    #             "type": "Resource",
+                    #             "resource": {
+                    #                 "name": "memory",
+                    #                 "target": {
+                    #                     "type": "Utilization",
+                    #                     "averageUtilization": 50,
+                    #                 },
+                    #             },
+                    #         }
+                    #     )
+
+                    if metrics:
+                        microservices.append(name)
+                        pMin, pMax = service_min_max.get(name, (1, 20))
+
+                        docs.append(
+                            {
+                                "apiVersion": "autoscaling/v2",
+                                "kind": "HorizontalPodAutoscaler",
+                                "metadata": {"name": name},
+                                "spec": {
+                                    "scaleTargetRef": {
+                                        "apiVersion": "apps/v1",
+                                        "kind": "Deployment",
+                                        "name": name,
+                                    },
+                                    "minReplicas": pMin,
+                                    "maxReplicas": pMax,
+                                    "metrics": metrics,
+                                    "behavior": behavior_spec,
+                                },
+                            }
+                        )
+
             all_configs.extend(docs)
-    with open(hpa_config_file, 'w') as f:
-        yaml.dump_all(all_configs, f, default_flow_style=False, Dumper=LiteralDumper, width=yaml_width)
+
+    with open(hpa_config_file, "w") as f:
+        yaml.dump_all(
+            all_configs,
+            f,
+            default_flow_style=False,
+            Dumper=LiteralDumper,
+            width=yaml_width,
+        )
 
 # def create_hpa_yaml(args):
 #     global microservices
@@ -225,7 +401,7 @@ def main():
     #     logging.info(f"Thread {i + 1}/{len(threads)} completed")
     # wrk2Process = None
     locustProcess = None
-    flags = f"--headless -u 1000 -r 100 -t {args.time} -d {metric}"
+    flags = f"--headless -u 100 -r 1 -t {args.time} -d {metric}"
     try:
         # wrk2Cmd = f"/usr/local/bin/wrk -t4 -c100 -d{args.time} -R500 -s {wrk2file_path} http://{frontend_ip} -- {metric}"
         # print("Applying wrk. Sleeping for 15s.")
