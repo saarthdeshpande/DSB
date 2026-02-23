@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 import yaml
+import re
 
 from utils import interval_string_to_seconds
 
@@ -14,7 +15,7 @@ hpa_config_file = "hpa_config.yaml"
 # wrk2file_path = "../wrk2/scripts/social-network/compose-post-gpt.lua"
 locustfile_path = "./locustfile.py"
 locust_venv = "./venv/bin"
-frontend_ip = "128.110.96.91:32000"  # <b>node's</b> internal IP
+frontend_ip = "128.110.96.70:32000"  # <b>node's</b> internal IP
 
 microservices = []
 
@@ -39,8 +40,8 @@ def create_hpa_yaml(args):
     # Default resources for all (stateless-ish) services
     # This is a safe baseline that matches typical SocialNetwork setups.
     DEF_all = {
-        "req": {"cpu": "500m", "memory": "128Mi"},
-        "lim": {"cpu": "1000m", "memory": "256Mi"},
+        "req": {"cpu": "1000m", "memory": "256Mi"},
+        "lim": {"cpu": "2000m", "memory": "512Mi"},
     }
 
     # Service-specific HPA tuning (p99-oriented)
@@ -256,6 +257,8 @@ def create_hpa_yaml(args):
             width=yaml_width,
         )
 
+    return DEF_all
+
 # def create_hpa_yaml(args):
 #     global microservices
 #     metrics = []
@@ -327,29 +330,96 @@ def create_hpa_yaml(args):
 #             width=yaml_width
 #         )
 
+def parse_quantity(quantity):
+    """
+    Parse kubernetes resource quantity to raw value.
+    m -> milli (values / 1000)
+    Ki -> 1024
+    Mi -> 1024^2
+    Gi -> 1024^3
+    """
+    if not quantity:
+        return 0
+    
+    # Handle millicores
+    if quantity.endswith('m'):
+        return int(quantity[:-1])
+    
+    # Handle limits (bytes)
+    multipliers = {
+        'Ki': 1024,
+        'Mi': 1024 ** 2,
+        'Gi': 1024 ** 3,
+        'Ti': 1024 ** 4
+    }
+    
+    for suffix, multiplier in multipliers.items():
+        if quantity.endswith(suffix):
+            return int(quantity[:-len(suffix)]) * multiplier
+            
+    # Plain integer
+    return int(quantity)
 
-def record_hpa_numbers(microservice, metric, duration):
-    cmd = f"kubectl get hpa {microservice}"
-    process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+def get_k8s_metrics(microservice, DEF_all):
+    # 1. Get HPA metadata from text output (single call for age, ref, replicas, thresholds)
+    hpa_cmd = f"kubectl get hpa {microservice} --no-headers"
+    hpa_res = subprocess.run(hpa_cmd, shell=True, capture_output=True, text=True)
+
+    ref, min_pods, max_pods, replicas, age = f"Deployment/{microservice}", -1, -1, 0, "<none>"
+    cpu_target, mem_target = -1, -1
+
+    if hpa_res.returncode == 0 and hpa_res.stdout.strip():
+        parts = hpa_res.stdout.strip().split()
+        if len(parts) >= 8:
+            ref, min_pods, max_pods, replicas, age = parts[1], parts[-4], parts[-3], parts[-2], parts[-1]
+            targets_str = " ".join(parts[2:-4])
+            thresholds = re.findall(r'/(\d+)%', targets_str)
+            cpu_target = thresholds[0] if len(thresholds) >= 1 else -1
+            mem_target = thresholds[1] if len(thresholds) >= 2 else -1
+
+    # 2. Get actual usage via kubectl top
+    top_cmd = f"kubectl top pods -l service={microservice} --no-headers"
+    top_res = subprocess.run(top_cmd, shell=True, capture_output=True, text=True)
+
+    cpu_sum, mem_sum, pod_count = 0, 0, 0
+    if top_res.returncode == 0 and top_res.stdout.strip():
+        for pod_line in top_res.stdout.strip().split("\n"):
+            p_parts = pod_line.split()
+            if len(p_parts) >= 3:
+                cpu_sum += parse_quantity(p_parts[1])
+                mem_sum += parse_quantity(p_parts[2])
+                pod_count += 1
+
+    cpu_avg = (cpu_sum / pod_count) if pod_count > 0 else 0
+    mem_avg = (mem_sum / pod_count) if pod_count > 0 else 0
+    cpu_util = int((cpu_avg / parse_quantity(DEF_all["req"]["cpu"])) * 100)
+    mem_util = int((mem_avg / parse_quantity(DEF_all["req"]["memory"])) * 100)
+
+    return f"{microservice} {ref} cpu: {cpu_util}%/{cpu_target}% memory: {mem_util}%/{mem_target}% {min_pods} {max_pods} {replicas} {age}"
+
+def record_hpa_numbers(microservice, metric, duration, DEF_all):
     start_time = time.time()
     duration_in_seconds = interval_string_to_seconds(duration)
 
     try:
-        with open(f"{metric}/{microservice}.txt", "w") as hpa_output_file:
+        output_filename = f"{metric}/{microservice}.txt"
+        with open(output_filename, "w") as hpa_output_file:
+            hpa_output_file.write("NAME REFERENCE TARGETS MINPODS MAXPODS REPLICAS AGE\n")
             while time.time() - start_time < duration_in_seconds:
-                output = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-                if output.stdout:
-                    hpa_output_file.write(output.stdout.strip().split("\n")[1])
+                line = get_k8s_metrics(microservice, DEF_all)
+                if line:
+                    hpa_output_file.write(line)
                     hpa_output_file.write("\n")
                     hpa_output_file.flush()  # Flush after each write
                 time.sleep(15)
-                # if process.poll() is not None:
-                #     break
+
+        if os.path.exists(output_filename) and os.stat(output_filename).st_size == 0:
+            os.remove(output_filename)
+            logging.info(f"Removed empty file for {microservice}")
+
         logging.info(f"Completed HPA monitoring for {microservice}")
     except Exception as e:
         logging.error(f"Error monitoring HPA for {microservice}: {str(e)}")
-    finally:
-        process.terminate()
 
 def main():
     global microservices
@@ -360,15 +430,12 @@ def main():
     parser.add_argument("-t", "--time", default="10m")
 
     args = parser.parse_args()
-    create_hpa_yaml(args)
+    DEF_all = create_hpa_yaml(args)
 
-    metric = ""
-    if args.cpu is True:
-        metric += "cpu_"
-    if args.memory is True:
-        metric += "memory_"
+    # Always force metric to cpu_memory_ for uniform collection
+    metric = "cpu_memory_"
 
-    if not metric:
+    if not getattr(args, "cpu", False) and not getattr(args, "memory", False):
         logging.warning(f"No metrics specified in args.")
         exit(-1)
 
@@ -386,9 +453,13 @@ def main():
     # print("Enabled port forwarding.")
     print("Collecting HPA data.")
 
+    # Ensure directory exists
+    if not os.path.exists(metric):
+        os.makedirs(metric)
+
     threads = []
     for hpa in microservices:
-        thread = threading.Thread(target=record_hpa_numbers, args=(hpa, metric, args.time))
+        thread = threading.Thread(target=record_hpa_numbers, args=(hpa, metric, args.time, DEF_all))
         # thread.start()
         threads.append(thread)
     # print("Starting HPA threads.")
@@ -401,7 +472,7 @@ def main():
     #     logging.info(f"Thread {i + 1}/{len(threads)} completed")
     # wrk2Process = None
     locustProcess = None
-    flags = f"--headless -u 100 -r 1 -t {args.time} -d {metric}"
+    flags = f"--headless -u 1000 -r 100 -t {args.time} -d {metric}"
     try:
         # wrk2Cmd = f"/usr/local/bin/wrk -t4 -c100 -d{args.time} -R500 -s {wrk2file_path} http://{frontend_ip} -- {metric}"
         # print("Applying wrk. Sleeping for 15s.")

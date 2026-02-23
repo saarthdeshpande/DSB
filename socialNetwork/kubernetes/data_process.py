@@ -49,10 +49,13 @@ for metric_folder_name in metric_folders:
                         continue
                     if args.version == "old":
                         if len(parts) == 7: # single metric
-                            metric_match = re.search(r'(\d+)%/(\d+)%|(<unknown>)/(\d+)%', parts[2])
+                            metric_match = re.search(r'(-?\d+)%/(-?\d+)%|(<unknown>)/(-?\d+)%', parts[2])
                             if metric_match:
                                 metric_value = metric_match.group(1) or metric_match.group(3)
-                                metric_value = int(metric_value) if metric_value and metric_value.isdigit() else None
+                                try:
+                                    metric_value = int(metric_value)
+                                except (ValueError, TypeError):
+                                    metric_value = None
                                 if len(thresholds) == 0:
                                     threshold = metric_match.group(2) or metric_match.group(4)
                                     if len(thresholds) == 0:
@@ -65,11 +68,14 @@ for metric_folder_name in metric_folders:
                             n_metrics = len(parts) - 6
                             thresholds = [None] * n_metrics
                             for metric_number in range(n_metrics):
-                                metric_match = re.search(r'(\d+)%/(\d+)%|(<unknown>)/(\d+)%', parts[2 + metric_number])
+                                metric_match = re.search(r'(-?\d+)%/(-?\d+)%|(<unknown>)/(-?\d+)%', parts[2 + metric_number])
 
                                 if metric_match:
                                     metric_value = metric_match.group(1) or metric_match.group(3)
-                                    metric_value = int(metric_value) if metric_value and metric_value.isdigit() else None
+                                    try:
+                                        metric_value = int(metric_value)
+                                    except (ValueError, TypeError):
+                                        metric_value = None
                                     if thresholds[n_metrics - 1] is None:
                                         threshold = metric_match.group(2) or metric_match.group(4)
                                         thresholds[metric_number] = int(threshold) if threshold else None
@@ -92,10 +98,13 @@ for metric_folder_name in metric_folders:
                             value_part = parts[value_index]
 
                             # Pattern matching for metric values
-                            metric_match = re.search(r'(\d+)%/(\d+)%|(<unknown>)/(\d+)%', value_part)
+                            metric_match = re.search(r'(-?\d+)%/(-?\d+)%|(<unknown>)/(-?\d+)%', value_part)
                             if metric_match:
                                 metric_value = metric_match.group(1) or metric_match.group(3)
-                                metric_value = int(metric_value) if metric_value and metric_value.isdigit() else None
+                                try:
+                                    metric_value = int(metric_value)
+                                except (ValueError, TypeError):
+                                    metric_value = None
                                 threshold = metric_match.group(2) or metric_match.group(4)
                                 thresholds[metric_number] = int(threshold) if threshold else None
                             else:
