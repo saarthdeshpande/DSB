@@ -8,6 +8,9 @@ import threading
 import time
 import yaml
 import re
+import sys
+
+logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 
 from utils import interval_string_to_seconds
 
@@ -178,13 +181,11 @@ def create_hpa_yaml(args):
                     for k in ("containers", "initContainers"):
                         for c in spec.get(k, []) or []:
                             r = c.setdefault("resources", {})
-                            rq = r.setdefault("requests", {})
-                            lm = r.setdefault("limits", {})
-
-                            rq.setdefault("cpu", DEF["req"]["cpu"])
-                            rq.setdefault("memory", DEF["req"]["memory"])
-                            lm.setdefault("cpu", DEF["lim"]["cpu"])
-                            lm.setdefault("memory", DEF["lim"]["memory"])
+                            rq, lm = r.setdefault("requests", {}), r.setdefault("limits", {})
+                            rq["cpu"] = DEF["req"]["cpu"]
+                            rq["memory"] = DEF["req"]["memory"]
+                            lm["cpu"] = DEF["lim"]["cpu"]
+                            lm["memory"] = DEF["lim"]["memory"]
 
                     # Do not attach HPA to stateful/infra components
                     if any(kw in name for kw in HPA_SKIP_KEYWORDS):

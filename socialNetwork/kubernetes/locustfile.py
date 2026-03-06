@@ -181,6 +181,8 @@ def load_rps_files(dir_path="alibaba_workload"):
         series = []
         with open(path, newline="") as f:
             reader = csv.DictReader(f)
+            for _ in range(1440):
+                next(reader, None)
             for row in reader:
                 series.append(float(row["rps"]) * SCALE_FACTOR)
         rps_schedules[endpoint] = series
