@@ -43,8 +43,8 @@ def create_hpa_yaml(args):
     # Default resources for all (stateless-ish) services
     # This is a safe baseline that matches typical SocialNetwork setups.
     DEF_all = {
-        "req": {"cpu": "1000m", "memory": "256Mi"},
-        "lim": {"cpu": "2000m", "memory": "512Mi"},
+        "req": {"cpu": "500m", "memory": "64Mi"},
+        "lim": {"cpu": "1000m", "memory": "128Mi"},
     }
 
     # Service-specific HPA tuning (p99-oriented)
@@ -428,6 +428,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--cpu", default=False, action='store_true')
     parser.add_argument("-m", "--memory", default=False, action='store_true')
+    parser.add_argument("-r", "--realtime", default=False, action='store_true')
     parser.add_argument("-t", "--time", default="10m")
 
     args = parser.parse_args()
@@ -474,6 +475,8 @@ def main():
     # wrk2Process = None
     locustProcess = None
     flags = f"--headless -u 1000 -r 100 -t {args.time} -d {metric}"
+    if args.realtime is True:
+        flags += " --realtime"
     try:
         # wrk2Cmd = f"/usr/local/bin/wrk -t4 -c100 -d{args.time} -R500 -s {wrk2file_path} http://{frontend_ip} -- {metric}"
         # print("Applying wrk. Sleeping for 15s.")

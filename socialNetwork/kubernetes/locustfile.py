@@ -30,7 +30,12 @@ service_files_dir = None
 # Alibaba Poisson replay
 rps_schedules = {}         # endpoint_name -> [rps values]
 replay_interval = 15.0
-SCALE_FACTOR = 0.03
+SCALE_FACTOR = 0.1
+ENDPOINT_SCALE_FACTORS = {
+    "compose_post": 0.03,          # baseline: avg 15.6 * 0.03 = 0.47/user
+    "read_home_timeline": 0.161,   # avg 2.9  * 0.161 = 0.47/user
+    "read_user_timeline": 0.334,   # avg 1.4  * 0.334 = 0.47/user
+}
 USE_ALIBABA_REPLAY = False
 
 # --- Random helpers (mirroring your Lua script) ---
@@ -181,10 +186,11 @@ def load_rps_files(dir_path="alibaba_workload"):
         series = []
         with open(path, newline="") as f:
             reader = csv.DictReader(f)
-            for _ in range(1440):
-                next(reader, None)
+            #for _ in range(1440):
+             #   next(reader, None)
             for row in reader:
-                series.append(float(row["rps"]) * SCALE_FACTOR)
+                scale = ENDPOINT_SCALE_FACTORS.get(endpoint, SCALE_FACTOR)
+                series.append(float(row["rps"]) * scale)
         rps_schedules[endpoint] = series
 
     logging.info(f"Alibaba traces loaded for endpoints: {list(rps_schedules.keys())}")
