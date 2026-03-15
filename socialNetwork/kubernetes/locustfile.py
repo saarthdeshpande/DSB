@@ -30,11 +30,10 @@ service_files_dir = None
 # Alibaba Poisson replay
 rps_schedules = {}         # endpoint_name -> [rps values]
 replay_interval = 15.0
-SCALE_FACTOR = 0.1
 ENDPOINT_SCALE_FACTORS = {
     "compose_post": 0.03,          # baseline: avg 15.6 * 0.03 = 0.47/user
-    "read_home_timeline": 0.161,   # avg 2.9  * 0.161 = 0.47/user
-    "read_user_timeline": 0.334,   # avg 1.4  * 0.334 = 0.47/user
+    "read_home_timeline": 0.05,   # avg 2.9  * 0.161 = 0.47/user
+    "read_user_timeline": 0.1,   # avg 1.4  * 0.334 = 0.47/user
 }
 USE_ALIBABA_REPLAY = False
 
@@ -189,7 +188,7 @@ def load_rps_files(dir_path="alibaba_workload"):
             #for _ in range(1440):
              #   next(reader, None)
             for row in reader:
-                scale = ENDPOINT_SCALE_FACTORS.get(endpoint, SCALE_FACTOR)
+                scale = ENDPOINT_SCALE_FACTORS[endpoint]
                 series.append(float(row["rps"]) * scale)
         rps_schedules[endpoint] = series
 
